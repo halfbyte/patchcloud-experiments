@@ -1,0 +1,180 @@
+<html>
+<head>
+  <meta http-equiv="Content-type" content="text/html; charset=utf-8">
+  <title>patchcloud prototype</title>
+  <script type="text/javascript" charset="utf-8" src="javascripts/vendor/jquery.js"></script>
+  <script type="text/javascript" charset="utf-8" src="javascripts/vendor/underscore.js"></script>
+  <script type="text/javascript" charset="utf-8" src="javascripts/vendor/web_midi_shim.js"></script>
+  
+  <script type="text/javascript" charset="utf-8">
+  
+  function initMidi() {
+  
+    var m = null;   // m = MIDIAccess object for you to make calls on
+    var currentInput = null;
+    var currentOutput = null;
+    var requesting = null;
+    navigator.requestMIDIAccess({sysex: true}).then( onsuccesscallback, onerrorcallback );
+    function onsuccesscallback( access ) { 
+        m = access;
+
+        // Things you can do with the MIDIAccess object:
+        var inputs = m.inputs();   // inputs = array of MIDIPorts
+        var outputs = m.outputs(); // outputs = array of MIDIPorts
+        var inSelect = $('#midi-inputs').get(0);
+        var outSelect = $('#midi-outputs').get(0);
+        
+        
+        
+        
+        var inId = localStorage['patchcloud.midi-input'];
+        var outId = localStorage['patchcloud.midi-output'];
+        
+        inputs.forEach(function(input, i) {
+          var current = inId == input.id;
+          inSelect.options[inSelect.options.length] = new Option(input.name, i, false, current);
+          if (current) setCurrentInput(input);
+        });
+        outputs.forEach(function(output, i) {
+          var current = outId == output.id;
+          outSelect.options[outSelect.options.length] = new Option(output.name, i, false, current);
+          if (current) setCurrentOutput(output);
+        });
+        
+        
+        
+        
+        $(outSelect).change(function(e) {
+          var $outSelect = $(this);
+          setCurrentOutput(m.outputs()[$outSelect.val()]);
+        });
+        $(inSelect).change(function(e) {
+          var $inSelect = $(this);
+          setCurrentInput(m.inputs()[$inSelect.val()]);
+          
+        });
+        
+    };
+    
+    function setCurrentInput(input) {
+      window.MIDIinput = input;
+      currentInput = input;
+      localStorage['patchcloud.midi-input'] = input.id;      
+    }
+    function setCurrentOutput(output) {
+      currentOutput = output;
+      localStorage['patchcloud.midi-output'] = output.id;
+    }
+    
+    function cmpArr(source, start, arr2) {
+      var arr1 = Array.apply([], source);      
+      var len = arr2.length;
+      return _(arr1.slice(start, start + len)).isEqual(arr2);
+    }
+    
+    function handleMidiMessage(event) {
+      if (event.data[0] == 0xf0) {
+        if (cmpArr(event.data, 1, [0x41, 0x10, 0x6a, 0x12])) {
+          if (requesting && cmpArr(event.data, 5, [0x11, requesting.offset, 0x00, 0x00])) {
+            var sliceable = Array.apply([], event.data);
+            var name = String.fromCharCode.apply("", sliceable.slice(9, 9+12));
+          }
+        }        
+      }
+    }
+
+    function onerrorcallback( err ) {
+        console.log("uh-oh! Something went wrong!  Error code: " + err.code );
+    }
+    
+    function PatchRequest(offset, input, output) {
+      this.input = input;
+      this.output = output;
+      this.offset = offset;
+      this.handlers = [];
+      var that = this;
+      
+      
+      function isDT1(msg) {
+        return msg[0] === 0xf0 && cmpArr(msg, 1, [0x41, 0x10, 0x6a, 0x12])
+      };
+      
+      var handleMessage = function(e) {
+        if (isDT1(e.data)) {
+          if (cmpArr(e.data, 5, [0x11, this.offset, 0x00, 0x00])) {
+            // yep. it's on us.
+            that.patch = Array.apply([], e.data).slice(9, 0x4a);
+            this.input.removeEventListener('midimessage', handleMessage, false);
+            that.finish(that.offset);
+            return true;
+          }
+        }        
+      }
+      handleMessage = handleMessage.bind(this);
+      
+      this.input.addEventListener('midimessage', handleMessage, false);
+      var message = rolandSysEx(output, 0x10, 0x11, [0x11, this.offset, 0, 0, 0, 0, 0, 0x4a])
+      output.send(message);
+      this.finish = function(offset) {
+        this.handlers.forEach(function(handler) {
+          handler(that.offset, that.patch);
+        });
+      };
+      this.then = function(handler) {
+        that.handlers.push(handler);
+        return that;
+      };
+      
+      
+      
+      return this;
+    };
+    
+    function rolandSysEx(output, device, command, message) {
+      
+      var header = [0xF0, 0x41, device, 0x6a, command];
+      
+      var sum = 0;
+      message.forEach(function(byte) {
+        sum += byte;
+      });
+      
+      var data = header.concat(message);
+      var checksum = 128 - (sum %  128);
+      if (checksum == 128) checksum = 0;
+      data.push(checksum);
+      data.push(0xf7);
+      return data;
+    }
+    
+    $('#request-patch').click(function(e) {
+      e.preventDefault();
+      function mkreq(offset) {
+          new PatchRequest(offset, currentInput, currentOutput).then(function(off, data) {
+            var name = String.fromCharCode.apply("", data.slice(0, 12));
+            $('#patch-list').append('<li data-offset="' + offset + '">' + (offset + 1) + ': ' + $.trim(name) + '</li>');
+          }).then(function(off) { 
+            if ((off+1) <= 127) { 
+              mkreq(off+1);
+            }
+          });
+      }
+      mkreq(0);
+      
+      
+      return false;
+    })
+    
+  }
+  
+  </script>
+  
+</head>
+<body onload="initMidi();">
+  <h1>Patchcloud</h1>
+  <label>In: <select id="midi-inputs"></select></label>
+  <label>Out:<select id="midi-outputs"></select></label>
+  <button id="request-patch">Request</button>
+  <ul id="patch-list"></ul>
+</body>
+</html>
